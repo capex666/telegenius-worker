@@ -1,43 +1,25 @@
 // TeleGenius Telegram Worker
 // Deploy questo codice su Railway.app
 
-import { Api, TelegramClient } from 'telegram'
+import { TelegramApi } from 'telegram'
 import { StringSession } from 'telegram/sessions'
 import { createClient } from '@supabase/supabase-js'
-import { NewMessage } from 'telegram/events'
-import input from 'input'
+import dotenv from 'dotenv'
+
+dotenv.config()
 
 // Configurazione
-const SUPABASE_URL = process.env.SUPABASE_URL!
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!
-const TOGETHER_AI_API_KEY = process.env.TOGETHER_AI_API_KEY!
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !TOGETHER_AI_API_KEY) {
-  console.error('❌ Missing environment variables!')
-  process.exit(1)
-}
+const SUPABASE_URL = process.env.SUPABASE_URL
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY
+const TOGETHER_AI_API_KEY = process.env.TOGETHER_AI_API_KEY
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-interface TelegramAccount {
-  id: string
-  api_id: string
-  api_hash: string
-  session_data: string
-  is_active: boolean
-  user_id: string
-}
-
-interface AIPersona {
-  base_prompt: string
-  welcome_message: string
-  payment_info_message: string
-  knowledge_base: any[]
-}
-
 class TelegramWorker {
-  private clients: Map<string, TelegramClient> = new Map()
-  private personas: Map<string, AIPersona> = new Map()
+  constructor() {
+    this.clients = new Map()
+    this.personas = new Map()
+  }
 
   async start() {
     console.log('🚀 TeleGenius Worker starting...')
@@ -52,67 +34,46 @@ class TelegramWorker {
   }
 
   async loadActiveAccounts() {
-    try {
-      const { data: accounts, error } = await supabase
-        .from('telegram_accounts')
-        .select(`
-          *,
-          ai_personas(*)
-        `)
-        .eq('is_active', true)
+    const { data: accounts, error } = await supabase
+      .from('telegram_accounts')
+      .select(`
+        *,
+        ai_personas(*)
+      `)
+      .eq('is_active', true)
 
-      if (error) {
-        console.error('❌ Error loading accounts:', error)
-        return
-      }
+    if (error) {
+      console.error('❌ Error loading accounts:', error)
+      return
+    }
 
-      console.log(`📋 Found ${accounts?.length || 0} active accounts`)
-
-      for (const account of accounts || []) {
-        await this.connectTelegramAccount(account)
-      }
-    } catch (error) {
-      console.error('❌ Error in loadActiveAccounts:', error)
+    for (const account of accounts || []) {
+      await this.connectTelegramAccount(account)
     }
   }
 
-  async connectTelegramAccount(account: TelegramAccount & { ai_personas: AIPersona[] }) {
+  async connectTelegramAccount(account) {
     try {
       console.log(`📱 Connecting account ${account.id}...`)
 
       const session = new StringSession(account.session_data)
-      const client = new TelegramClient(session, parseInt(account.api_id), account.api_hash, {
+      const client = new TelegramApi(session, parseInt(account.api_id), account.api_hash, {
         connectionRetries: 5,
       })
 
-      await client.start({
-        phoneNumber: async () => await input.text('Phone number: '),
-        password: async () => await input.text('Password: '),
-        phoneCode: async () => await input.text('Code: '),
-        onError: (err) => console.log(err),
-      })
-
+      await client.connect()
       console.log(`✅ Connected to Telegram account ${account.id}`)
 
       // Salva client e persona
       this.clients.set(account.id, client)
-      if (account.ai_personas?.[0]) {
+      if (account.ai_personas && account.ai_personas[0]) {
         this.personas.set(account.id, account.ai_personas[0])
       }
 
       // Ascolta nuovi messaggi
-      client.addEventHandler(async (event) => {
-        await this.handleNewMessage(account.id, event)
-      }, new NewMessage({ incoming: true }))
-
-      // Aggiorna stato nel database
-      await supabase
-        .from('telegram_accounts')
-        .update({ 
-          connection_status: 'connected',
-          last_activity: new Date().toISOString()
-        })
-        .eq('id', account.id)
+      client.addEventHandler(async (update) => {
+        await this.handleNewMessage(account.id, update)
+      }, {})
 
     } catch (error) {
       console.error(`❌ Failed to connect account ${account.id}:`, error)
@@ -128,16 +89,15 @@ class TelegramWorker {
     }
   }
 
-  async handleNewMessage(accountId: string, event: any) {
+  async handleNewMessage(accountId, update) {
     try {
-      const message = event.message
-      
       // Verifica che sia un messaggio privato
-      if (!message || !message.peerId || message.peerId.className !== 'PeerUser') return
+      if (!update.message || !update.message.peerId || !update.message.peerId.userId) return
 
+      const message = update.message
       const userId = message.peerId.userId.toString()
       const messageText = message.message || ''
-      const isImage = message.media?.photo ? true : false
+      const isImage = message.media && message.media.photo ? true : false
 
       console.log(`📨 New message from ${userId}: ${messageText.substring(0, 50)}...`)
 
@@ -167,25 +127,21 @@ class TelegramWorker {
     }
   }
 
-  async handleNewUser(accountId: string, userId: string, message: any) {
+  async handleNewUser(accountId, userId, message) {
     const client = this.clients.get(accountId)
     const persona = this.personas.get(accountId)
     
     if (!client || !persona) return
 
     try {
-      // Ottieni info utente
-      const user = await client.getEntity(parseInt(userId))
-      
       // Crea nuova conversazione
       const { data: conversation } = await supabase
         .from('conversations')
         .insert({
           account_id: accountId,
           telegram_user_id: parseInt(userId),
-          telegram_username: user.username || '',
-          telegram_first_name: user.firstName || '',
-          telegram_last_name: user.lastName || '',
+          telegram_username: message.fromId && message.fromId.username || '',
+          telegram_first_name: message.fromId && message.fromId.firstName || '',
           status: 'active',
           message_count: 1
         })
@@ -206,7 +162,7 @@ class TelegramWorker {
     }
   }
 
-  async handleRegularMessage(accountId: string, conversation: any, messageText: string) {
+  async handleRegularMessage(accountId, conversation, messageText) {
     const client = this.clients.get(accountId)
     const persona = this.personas.get(accountId)
     
@@ -227,7 +183,7 @@ class TelegramWorker {
       
       if (aiResponse) {
         // Invia risposta
-        await client.sendMessage(parseInt(conversation.telegram_user_id), {
+        await client.sendMessage(conversation.telegram_user_id, {
           message: aiResponse
         })
 
@@ -247,18 +203,11 @@ class TelegramWorker {
     }
   }
 
-  async handlePaymentScreenshot(accountId: string, conversation: any, message: any) {
+  async handlePaymentScreenshot(accountId, conversation, message) {
     const client = this.clients.get(accountId)
     if (!client) return
 
     try {
-      // Ottieni l'account per il user_id
-      const { data: account } = await supabase
-        .from('telegram_accounts')
-        .select('user_id')
-        .eq('id', accountId)
-        .single()
-
       // Aggiorna conversazione
       await supabase
         .from('conversations')
@@ -268,19 +217,26 @@ class TelegramWorker {
         })
         .eq('id', conversation.id)
 
+      // Trova l'account per ottenere user_id
+      const { data: account } = await supabase
+        .from('telegram_accounts')
+        .select('user_id')
+        .eq('id', accountId)
+        .single()
+
       // Crea notifica pagamento
       await supabase
         .from('payment_notifications')
         .insert({
           conversation_id: conversation.id,
           account_id: accountId,
-          user_id: account?.user_id,
+          user_id: account && account.user_id,
           status: 'pending',
           payment_method: 'screenshot'
         })
 
       // Messaggio di conferma all'utente
-      await client.sendMessage(parseInt(conversation.telegram_user_id), {
+      await client.sendMessage(conversation.telegram_user_id, {
         message: "Grazie! 🙏 Abbiamo ricevuto la tua prova di pagamento. Un operatore la verificherà al più presto e ti contatterà per i prossimi passi. 😊"
       })
 
@@ -291,7 +247,7 @@ class TelegramWorker {
     }
   }
 
-  async generateAIResponse(persona: AIPersona, messageText: string, conversation: any): Promise<string | null> {
+  async generateAIResponse(persona, messageText, conversation) {
     try {
       // Costruisci il prompt
       const systemPrompt = `${persona.base_prompt}
@@ -323,13 +279,8 @@ ${persona.payment_info_message}`
         }),
       })
 
-      if (!response.ok) {
-        console.error('❌ Together.ai API error:', response.status, response.statusText)
-        return null
-      }
-
       const data = await response.json()
-      return data.choices?.[0]?.message?.content || null
+      return data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || null
 
     } catch (error) {
       console.error('❌ Error generating AI response:', error)
@@ -347,7 +298,7 @@ ${persona.payment_info_message}`
           console.log('📡 Account change detected:', payload)
           
           if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-            const account = payload.new as TelegramAccount
+            const account = payload.new
             if (account.is_active && !this.clients.has(account.id)) {
               // Carica persona e connetti
               const { data: personas } = await supabase
@@ -374,11 +325,6 @@ worker.start().catch(console.error)
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-  console.log('🛑 TeleGenius Worker shutting down...')
-  process.exit(0)
-})
-
-process.on('SIGTERM', () => {
   console.log('🛑 TeleGenius Worker shutting down...')
   process.exit(0)
 })
