@@ -1,0 +1,36 @@
+{
+  "name": "telegenius-worker",
+  "version": "1.0.0",
+  "description": "TeleGenius Telegram Worker for AI automation",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "postinstall": "npm run build"
+  },
+  "dependencies": {
+    "telegram": "^2.22.2",
+    "@supabase/supabase-js": "^2.38.0",
+    "dotenv": "^16.3.1",
+    "input": "^1.0.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.2.2",
+    "tsx": "^3.12.7",
+    "@types/node": "^20.8.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "telegram",
+    "ai",
+    "automation",
+    "bot",
+    "telegenius"
+  ],
+  "author": "TeleGenius",
+  "license": "MIT"
+}
